@@ -83,6 +83,8 @@ module OmniAuth
       def callback_url
         if @authorization_code_from_signed_request_in_cookie
           ''
+        elsif options[:callback_url].is_a?(Proc)
+          options[:callback_url].call(env)
         else
           options[:callback_url] || super
         end
