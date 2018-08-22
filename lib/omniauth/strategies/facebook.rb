@@ -1,5 +1,5 @@
 require 'omniauth/strategies/oauth2'
-require 'base64'
+require 'omniauth/facebook/signed_request'
 require 'openssl'
 require 'rack/utils'
 require 'uri'
@@ -8,23 +8,18 @@ module OmniAuth
   module Strategies
     class Facebook < OmniAuth::Strategies::OAuth2
       class NoAuthorizationCodeError < StandardError; end
-      class UnknownSignatureAlgorithmError < NotImplementedError; end
 
       DEFAULT_SCOPE = 'email'
 
       option :client_options, {
-        :site => 'https://graph.facebook.com',
-        :authorize_url => "https://www.facebook.com/dialog/oauth",
-        :token_url => '/oauth/access_token'
-      }
-
-      option :token_params, {
-        :parse => :query
+        site: 'https://graph.facebook.com/v2.10',
+        authorize_url: "https://www.facebook.com/v2.10/dialog/oauth",
+        token_url: 'oauth/access_token'
       }
 
       option :access_token_options, {
-        :header_format => 'OAuth %s',
-        :param_name => 'access_token'
+        header_format: 'OAuth %s',
+        param_name: 'access_token'
       }
 
       option :authorize_options, [:scope, :display, :auth_type]
@@ -56,15 +51,15 @@ module OmniAuth
       end
 
       def raw_info
-        @raw_info ||= access_token.get('/me', info_options).parsed || {}
+        @raw_info ||= access_token.get('me', info_options).parsed || {}
       end
 
       def info_options
-        params = {:appsecret_proof => appsecret_proof}
-        params.merge!({:fields => options[:info_fields]}) if options[:info_fields]
-        params.merge!({:locale => options[:locale]}) if options[:locale]
+        params = {appsecret_proof: appsecret_proof}
+        params.merge!({fields: (options[:info_fields] || 'name,email')})
+        params.merge!({locale: options[:locale]}) if options[:locale]
 
-        { :params => params }
+        { params: params }
       end
 
       def callback_phase
@@ -73,8 +68,8 @@ module OmniAuth
         end
       rescue NoAuthorizationCodeError => e
         fail!(:no_authorization_code, e)
-      rescue UnknownSignatureAlgorithmError => e
-        fail!(:unknown_signature_algoruthm, e)
+      rescue OmniAuth::Facebook::SignedRequest::UnknownSignatureAlgorithmError => e
+        fail!(:unknown_signature_algorithm, e)
       end
 
       # NOTE If we're using code from the signed request then FB sets the redirect_uri to '' during the authorize
@@ -86,7 +81,8 @@ module OmniAuth
         elsif options[:callback_url].is_a?(Proc)
           options[:callback_url].call(env)
         else
-          options[:callback_url] || super
+          # Fixes regression in omniauth-oauth2 v1.4.0 by https://github.com/intridea/omniauth-oauth2/commit/85fdbe117c2a4400d001a6368cc359d88f40abc7
+          options[:callback_url] || (full_host + script_name + callback_path)
         end
       end
 
@@ -121,7 +117,7 @@ module OmniAuth
       private
 
       def signed_request_from_cookie
-        @signed_request_from_cookie ||= raw_signed_request_from_cookie && parse_signed_request(raw_signed_request_from_cookie)
+        @signed_request_from_cookie ||= raw_signed_request_from_cookie && OmniAuth::Facebook::SignedRequest.parse(raw_signed_request_from_cookie, client.secret)
       end
 
       def raw_signed_request_from_cookie
@@ -161,37 +157,13 @@ module OmniAuth
         end
       end
 
-      def parse_signed_request(value)
-        signature, encoded_payload = value.split('.')
-        return if signature.nil?
-
-        decoded_hex_signature = base64_decode_url(signature)
-        decoded_payload = MultiJson.decode(base64_decode_url(encoded_payload))
-
-        unless decoded_payload['algorithm'] == 'HMAC-SHA256'
-          raise UnknownSignatureAlgorithmError, "unknown algorithm: #{decoded_payload['algorithm']}"
-        end
-
-        if valid_signature?(client.secret, decoded_hex_signature, encoded_payload)
-          decoded_payload
-        end
-      end
-
-      def valid_signature?(secret, signature, payload, algorithm = OpenSSL::Digest::SHA256.new)
-        OpenSSL::HMAC.digest(algorithm, secret, payload) == signature
-      end
-
-      def base64_decode_url(value)
-        value += '=' * (4 - value.size.modulo(4))
-        Base64.decode64(value.tr('-_', '+/'))
-      end
-
       def image_url(uid, options)
         uri_class = options[:secure_image_url] ? URI::HTTPS : URI::HTTP
-        url = uri_class.build({:host => 'graph.facebook.com', :path => "/#{uid}/picture"})
+        site_uri = URI.parse(client.site)
+        url = uri_class.build({host: site_uri.host, path: "#{site_uri.path}/#{uid}/picture"})
 
-        query = if options[:image_size].is_a?(String)
-          { :type => options[:image_size] }
+        query = if options[:image_size].is_a?(String) || options[:image_size].is_a?(Symbol)
+          { type: options[:image_size] }
         elsif options[:image_size].is_a?(Hash)
           options[:image_size]
         end
