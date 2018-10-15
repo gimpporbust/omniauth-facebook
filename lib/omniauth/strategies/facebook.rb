@@ -96,9 +96,16 @@ module OmniAuth
       # For example: /auth/facebook?display=popup
       def authorize_params
         super.tap do |params|
-          %w[display scope auth_type].each do |v|
+          # Allow overridding state within authorize_params
+          %w[display scope auth_type state].each do |v|
             if request.params[v]
-              params[v.to_sym] = request.params[v]
+              request_param = request.params[v]
+              given = if request_param.is_a?(Proc)
+                request_param.call(env)
+              else
+                request_param
+              end
+              params[v.to_sym] = given
             end
           end
 
